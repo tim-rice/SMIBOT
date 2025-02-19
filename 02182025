@@ -1,0 +1,565 @@
+//@version=5
+strategy("ProfitWave SMI+ Strategy", overlay=true, initial_capital=1000, default_qty_type=strategy.percent_of_equity, default_qty_value=10, slippage=1, commission_type=strategy.commission.percent, commission_value=0.12)
+
+// --- GROUP SECTION DEFINITIONS
+groupTitle_MasterToggle = "Master Filter Toggle"
+groupTitle_Trend = "Trend Confirmation"
+groupTitle_BuyLogic = "BUY Filter Logic"
+groupTitle_SellLogic = "SELL Filter Logic"
+groupTitle_Toggles = "Toggles & Filters"
+groupTitle_DateRange = "Date Range"
+groupTitle_SMI = "SMI Settings"
+groupTitle_RSI = "RSI Signal Settings"
+groupTitle_Threshold = "SMI Threshold Settings"
+groupTitle_ATR_TP = "ATR Filter Settings"
+groupTitle_EMA_Signal = "EMA High/Low Signal Settings"
+groupTitle_PriceTest = "Price Test Delayed Buy Settings"
+groupTitle_AdditionalExit = "Additional Exit Settings"
+groupTitle_StopLoss = "Stop Loss Settings"
+groupTitle_Volume = "Volume Filter"
+groupTitle_EMACrossover = "Moving Average Crossover Settings"  // Changed group name for clarity
+
+
+// --- MASTER FILTER TOGGLE ---
+useMasterFilter = input.bool(true, "Use Filters", group=groupTitle_MasterToggle, tooltip="If enabled, uses the individual filter settings. If disabled, all filters are turned OFF, and only the core SMI crossover and MA crossover signals are used.")
+
+// --- NEW: Variable to track Master Filter state change ---
+var bool justTurnedOffMasterFilter = false
+
+// --- BUY FILTER LOGIC ---
+buyLogicSMI = input.string("AND", "SMI Logic (BUY)", options=["AND", "OR", "ONLY", "OFF"], group=groupTitle_BuyLogic, tooltip="Logic for combining SMI filter with other BUY signals.")
+buyLogicRSI = input.string("OR", "RSI Logic (BUY)", options=["AND", "OR", "ONLY", "OFF"], group=groupTitle_BuyLogic, tooltip="Logic for combining RSI Underbought with other BUY signals.")
+buyLogicEMASignal = input.string("OFF", "EMA Signal Logic (BUY)", options=["AND", "OR", "ONLY", "OFF"], group=groupTitle_BuyLogic, tooltip="Logic for combining EMA High/Low Signal with other BUY signals.")
+buyLogicPriceTest = input.string("OR", "Price Test Logic (BUY)", options=["AND", "OR", "ONLY", "OFF"], group=groupTitle_BuyLogic, tooltip="Logic for combining Price Test Delayed Buy with other BUY signals.")
+buyLogicCandle = input.string("OFF", "Candle Pattern Logic (BUY)", options=["AND", "OR", "ONLY", "OFF"], group=groupTitle_BuyLogic, tooltip="Logic for combining Bullish Candle Patterns with other BUY signals.")
+buyLogicPMO = input.string("OFF", "PMO Logic (BUY)", options=["AND", "OR", "ONLY", "OFF"], group=groupTitle_BuyLogic, tooltip="Logic for combining PMO crossover with other BUY signals.")
+
+// --- SELL FILTER LOGIC ---
+sellLogicSMI = input.string("AND", "SMI Logic (SELL)", options=["AND", "OR", "ONLY", "OFF"], group=groupTitle_SellLogic, tooltip="Logic for combining SMI filter with other SELL signals.")
+sellLogicRSI = input.string("AND", "RSI Logic (SELL)", options=["AND", "OR", "ONLY", "OFF"], group=groupTitle_SellLogic, tooltip="Logic for combining RSI Oversold with other SELL signals.")
+sellLogicEMASignal = input.string("OFF", "EMA Signal Logic (SELL)", options=["AND", "OR", "ONLY", "OFF"], group=groupTitle_SellLogic, tooltip="Logic for combining EMA High/Low Signal with other SELL signals.")
+sellLogicRedCandleExit = input.string("OR", "Red Candle Exit Logic (SELL)", options=["AND", "OR", "ONLY", "OFF"], group=groupTitle_SellLogic, tooltip="Logic for combining Consecutive Red Candle Exit with other SELL signals.")
+sellLogicCandle = input.string("OFF", "Candle Pattern Logic (SELL)", options=["AND", "OR", "ONLY", "OFF"], group=groupTitle_SellLogic, tooltip="Logic for combining Bearish Candle Patterns with other SELL signals.")
+sellLogicPMO = input.string("OFF", "PMO Logic (SELL)", options=["AND", "OR", "ONLY", "OFF"], group=groupTitle_SellLogic, tooltip="Logic for combining PMO crossunder with other SELL signals.")
+
+// --- TOGGLES ---
+useATRFilter = input.bool(true, "Use ATR Volatility Filter", group=groupTitle_Toggles, tooltip="Enable/disable the ATR volatility filter for take profit levels.")
+useRSIFilter = input.bool(true, "Use RSI Oversold Filter", group=groupTitle_Toggles, tooltip="Enable/disable the RSI oversold filter for delayed exits.")
+useEMASignal = input.bool(false, "Use EMA High/Low Signal", group=groupTitle_Toggles, tooltip="Enable/disable the EMA High/Low signal.")
+usePriceTestDelayedBuy = input.bool(false, "Use Price Test Delayed Buy", group=groupTitle_Toggles, tooltip="Enable/disable the Price Test Delayed Buy feature.")
+useSMIFilter = input.bool(true, "Use SMI Filter", group=groupTitle_Toggles, tooltip="Enable/disable the SMI filter.")
+useCandlePatterns = input.bool(false, "Use Candle Patterns", group=groupTitle_Toggles, tooltip="Enable/disable candle patterns.")
+usePMOFilter = input.bool(false, "Use PMO Filter", group=groupTitle_Toggles)
+useEMACrossover = input.bool(false, "Use Moving Average Crossover", group="Moving Average Crossover Settings", tooltip="Enable/disable the moving average crossover strategy.")
+useTrendConfirmation = input.bool(false, "Use Trend Confirmation", group=groupTitle_Trend)
+useVolumeFilter = input.bool(false, "Use Volume Filter", group=groupTitle_Volume)
+
+showEMASignals = input.bool(false, "Show EMA High/Low Indicators", group=groupTitle_Toggles, tooltip="Show/hide the EMA High/Low signal indicators.")
+showDebugPlots = input.bool(false, "Show Debug Plots", group=groupTitle_Toggles, tooltip="Show/hide debug plots.")
+showPlots = input.bool(true, "Show Indicator Plots", group=groupTitle_Toggles, tooltip="Show/hide indicator plots.")
+
+// --- DATE RANGE INPUTS ---
+startDate = input.time(title="Start Date", defval=timestamp("2023-01-01"), group=groupTitle_DateRange)
+endDate = input.time(title="End Date", defval=timestamp("2024-01-01"), group=groupTitle_DateRange)
+inDateRange = time >= startDate and time <= endDate
+
+// --- SMI INPUTS ---
+lengthK = input.int(10, "%K Length", minval=1, maxval=15000, group=groupTitle_SMI)
+lengthD = input.int(3, "%D Length", minval=1, maxval=4999, group=groupTitle_SMI)
+lengthEMA = input.int(3, "SMI EMA Length", minval=1, maxval=4999, group=groupTitle_SMI)
+
+emaEma(source, length) =>
+    ema1 = ta.ema(source, length)
+    ema2 = ta.ema(ema1, length)
+    ema2
+
+highestHighSMI = ta.highest(lengthK)
+lowestLowSMI = ta.lowest(lengthK)
+highestLowestRangeSMI = highestHighSMI - lowestLowSMI
+relativeRangeSMI = close - (highestHighSMI + lowestLowSMI) / 2
+smi = 200 * (emaEma(relativeRangeSMI, lengthD) / emaEma(highestLowestRangeSMI, lengthD))
+smi_ema = ta.ema(smi, lengthEMA)
+
+// --- RSI INPUTS ---
+rsiLength = input.int(title="RSI Length", defval=14, minval=2, maxval=50, group=groupTitle_RSI)
+rsiOversoldLevel = input.int(title="RSI Oversold Level for Delay Exit", defval=30, minval=10, maxval=50, group=groupTitle_RSI)
+rsiUnderboughtLevel = input.int(title="RSI Underbought Level for Long Entry", defval=70, minval=50, maxval=90, group=groupTitle_RSI)
+rsiLogicCombination = input.string("AND", "RSI Logic Combination (Long Entry)", options=["AND", "OR", "RSI_ONLY"], group=groupTitle_RSI)
+rsiValue = ta.rsi(close, rsiLength)
+
+rsiUnderboughtCondition = rsiValue >= rsiUnderboughtLevel
+
+// --- THRESHOLD INPUTS ---
+buyThreshold = input.float(title="Buy Threshold", defval=-73.45, group=groupTitle_Threshold)  //Keeping for now
+sellThreshold = input.float(title="Sell Threshold", defval=71.93, group=groupTitle_Threshold) //Keeping for now
+
+// --- ATR INPUTS FOR DYNAMIC TP ---
+atrLengthTP = input.int(title="ATR Length for TP", defval=20, minval=5, maxval=100, group=groupTitle_ATR_TP)
+atrValueTP = ta.atr(atrLengthTP)
+atrLowVolatilityThreshold = input.float(title="Low Volatility Threshold", defval=0.01, group=groupTitle_ATR_TP)
+atrMediumVolatilityThreshold = input.float(title="Medium Volatility Threshold", defval=0.025, group=groupTitle_ATR_TP)
+tpMultiplier1 = input.float(title="TP 1 Multiplier (x ATR)", defval=1.0, minval=0.1, maxval=5.0, group=groupTitle_ATR_TP)
+tpMultiplier2 = input.float(title="TP 2 Multiplier (x ATR)", defval=2.0, minval=0.1, maxval=10.0, group=groupTitle_ATR_TP)
+tpMultiplier3 = input.float(title="TP 3 Multiplier (x ATR)", defval=3.0, minval=0.1, maxval=15.0, group=groupTitle_ATR_TP)
+tpMultiplier4 = input.float(title="TP 4 Multiplier (x ATR)", defval=4.0, minval=0.1, maxval=20.0, group=groupTitle_ATR_TP)
+tpMultiplier5 = input.float(title="TP 5 Multiplier (x ATR)", defval=5.0, minval=0.1, maxval=25.0, group=groupTitle_ATR_TP)
+minATR = input.float(0.005, "Minimum ATR", minval=0.0, group=groupTitle_ATR_TP)
+
+// --- EMA HIGH/LOW SIGNAL OPTIONS ---
+emaSignalDuration = input.int(2, "EMA Signal Duration (bars)", minval=1, maxval=10, group=groupTitle_EMA_Signal)
+emaSignalPeriod = input.int(20, "EMA High/Low Period", minval=1, maxval=200, group=groupTitle_EMA_Signal)
+highSource = input.source(high, "High Price Source", group=groupTitle_EMA_Signal)
+lowSource = input.source(low, "Low Price Source", group=groupTitle_EMA_Signal)
+
+// --- PRICE TEST DELAYED BUY OPTIONS (related to EMA High/Low) ---
+emaPriceTestDuration = input.int(5, "Price Test Duration (bars)", minval=1, maxval=15, group=groupTitle_PriceTest)
+priceTestPercentOffset = input.float(5.0, "Price Test Offset (%)", minval=0.0, maxval=20.0, step=0.5, group=groupTitle_PriceTest)
+priceTestClimbConfirmDuration = input.int(2, "Climb Confirm Duration (bars)", minval=1, maxval=2, group=groupTitle_PriceTest)
+
+// --- ADDITIONAL EXIT SETTINGS ---
+useConsecutiveRedExit = input.bool(false, "Use Consecutive Red Candles Exit", group=groupTitle_AdditionalExit, tooltip="Enable/disable exiting a long position after a specified number of consecutive red candles.")
+consecutiveRedCandlesForExit = input.int(3, "Consecutive Red Candles", minval=2, maxval=20, group=groupTitle_AdditionalExit, tooltip="The number of consecutive red candles required to trigger an exit.")
+maxOpenTrades = input.int(1, "Max Open Trades", minval=1, group=groupTitle_AdditionalExit, tooltip="The maximum number of open trades allowed.")
+
+// --- STOP LOSS INPUTS ---
+useStopLoss = input.bool(true, "Use Stop Loss", group=groupTitle_StopLoss)
+stopLossPercent = input.float(5.0, "Stop Loss Percentage", minval=0.1, maxval=20.0, step=0.1, group=groupTitle_StopLoss)
+useTrailingStop = input.bool(false, "Use Trailing Stop Loss", group=groupTitle_StopLoss)
+trailingStopPercent = input.float(3.0, "Trailing Stop Loss Offset (%)", minval=0.1, maxval=10.0, step=0.1, group=groupTitle_StopLoss)
+
+// ------------TREND CONFIRMATION LOGIC--------------------------------------------------------------------------------------------
+
+// --- TREND DEFINITION INPUTS ---
+trendDefinitionMethod = input.string("EMA", "Trend Definition Method", options=["EMA", "Alternate"], group=groupTitle_Trend)
+fastEMAPeriod = input.int(8, "Fast EMA Period", minval=1, group=groupTitle_Trend)
+pivotEMAPeriod = input.int(21, "Pivot EMA Period", minval=1, group=groupTitle_Trend)
+slowEMAPeriod = input.int(34, "Slow EMA Period", minval=1, group=groupTitle_Trend)
+
+// --- HULL & VWMA INPUTS ---
+hullLength = input.int(9, "Hull MA Length", minval=1, group=groupTitle_Trend)
+vwmaLength = input.int(20, "VWMA Length", minval=1, group=groupTitle_Trend)
+
+// --- VOLUME FILTER ---
+//useVolumeFilter = input.bool(false, "Use Volume Filter", group=groupTitle_Volume)  -- Moved to Toggles
+volumeLength = input.int(20, "Volume MA Length", minval=1, group=groupTitle_Volume)
+volumeThreshold = input.float(1.5, "Volume Threshold (x MA)", minval=0.1, group=groupTitle_Volume)
+
+// --- CALCULATE INDICATORS ---
+fastEMA = ta.ema(close, fastEMAPeriod)
+pivotEMA = ta.ema(close, pivotEMAPeriod)
+slowEMA = ta.ema(close, slowEMAPeriod)
+hullMA = ta.wma(2 * ta.wma(close, int(hullLength / 2)) - ta.wma(close, hullLength), int(math.sqrt(hullLength)))
+vwma = ta.vwma(close, vwmaLength)
+volumeMA = ta.sma(volume, volumeLength)
+volumeCondition = volume > volumeMA * volumeThreshold
+
+// --- TREND DEFINITION LOGIC ---
+bullishTrendEMA = close > fastEMA and fastEMA > pivotEMA and pivotEMA > slowEMA
+bearishTrendEMA = close < fastEMA and fastEMA < pivotEMA and pivotEMA < slowEMA
+
+bullishTrendAlternate = hullMA > hullMA[1] and close > vwma and close > ta.vwap
+bearishTrendAlternate = hullMA < hullMA[1] and close < vwma and close < ta.vwap
+
+bullishTrend = switch trendDefinitionMethod
+    "EMA" => bullishTrendEMA
+    "Alternate" => bullishTrendAlternate
+
+bearishTrend = switch trendDefinitionMethod
+    "EMA" => bearishTrendEMA
+    "Alternate" => bearishTrendAlternate
+
+// --- STOP LOSS CALCULATION ---
+var float stopLossPrice = na
+
+// --- DETERMINE NUMBER OF TP ORDERS BASED ON ATR ---
+numTPOrders = 1
+if useATRFilter
+    if atrValueTP >= atrLowVolatilityThreshold and atrValueTP < atrMediumVolatilityThreshold
+        numTPOrders := 3
+    else if atrValueTP >= atrMediumVolatilityThreshold
+        numTPOrders := 5
+
+emaHigh = ta.ema(highSource, emaSignalPeriod)
+emaLow = ta.ema(lowSource, emaSignalPeriod)
+
+priceAboveEmaHigh = close > emaHigh
+priceBelowEmaLow = close < emaLow
+
+emaLongCondition = 0
+emaShortCondition = 0
+
+for i = 0 to emaSignalDuration - 1
+    if priceAboveEmaHigh[i]
+        emaLongCondition += 1
+    if priceBelowEmaLow[i]
+        emaShortCondition += 1
+
+emaLongSignal = emaLongCondition == emaSignalDuration
+emaShortSignal = emaShortCondition == emaSignalDuration
+
+// --- Price Test Delayed Buy Logic ---
+var int breakoutBarIndex = na
+var bool priceTested = false
+
+priceTestLow = emaLow * (1 - priceTestPercentOffset / 100)
+
+if (usePriceTestDelayedBuy and emaLongSignal)
+    breakoutBarIndex := bar_index
+    priceTested := false
+
+priceDeclineCondition = close <= emaLow or close <= priceTestLow
+priceClimbCondition = close > close[1]
+
+priceTestDelayedBuySignal = false
+
+if (usePriceTestDelayedBuy and ta.barssince(not na(breakoutBarIndex)) <= emaPriceTestDuration and not priceTested)
+    if (priceDeclineCondition)
+        priceTested := true
+
+if (priceTested)
+    priceClimbCounter = 0
+    for i = 0 to priceTestClimbConfirmDuration - 1
+        if priceClimbCondition[i]
+            priceClimbCounter += 1
+    if priceClimbCounter == priceTestClimbConfirmDuration
+        priceTestDelayedBuySignal := true
+        priceTested := false
+
+// --- CANDLE PATTERN DETECTION ---
+bullishEngulfingPattern = close > open and close > open[1] and open < close[1] and open < open[1]
+bearishEngulfingPattern = open > close and open > close[1] and close < open[1] and close < close[1]
+
+// --- PMO CALCULATIONS ---
+groupTitle_PMO = "PMO Settings"
+pmoLength1 = input.int(35, "PMO Length 1", minval=1, group=groupTitle_PMO, tooltip="The first smoothing period for the PMO calculation.")
+pmoLength2 = input.int(20, "PMO Length 2", minval=1, group=groupTitle_PMO, tooltip="The second smoothing period for the PMO calculation.")
+pmoSignalLength = input.int(10, "PMO Signal Length", minval=1, group=groupTitle_PMO, tooltip="The smoothing period for the PMO signal line.")
+pmoROC = ta.roc(close, 1)
+pmoROCSum = ta.sma(pmoROC, pmoLength1)
+pmoWMA = ta.wma(pmoROCSum, pmoLength2) * 10
+pmoSignal = ta.ema(pmoWMA, pmoSignalLength)
+longConditionPMO = ta.crossover(pmoWMA, pmoSignal)
+shortConditionPMO = ta.crossunder(pmoWMA, pmoSignal)
+
+// --- SMI BUY/SELL CONDITIONS (Corrected) ---
+longConditionSMI = ta.crossover(smi, smi_ema)
+shortConditionSMI = ta.crossunder(smi, smi_ema)
+
+// --- RSI EXIT CONDITIONS ---
+rsiOversold = rsiValue <= rsiOversoldLevel
+delayExitConditionStart = rsiOversold and shortConditionSMI
+var bool exitDelayActive = false
+if delayExitConditionStart
+    exitDelayActive := true
+delayExitConditionConfirm = exitDelayActive and rsiValue > rsiOversoldLevel + 5
+if rsiValue > rsiOversoldLevel + 10
+    exitDelayActive := false
+shortConditionRSI = delayExitConditionConfirm
+
+// --- CONSECUTIVE RED CANDLE EXIT ---
+consecutiveRedCandlesExit = false
+redCandleCount = 0
+for i = 0 to consecutiveRedCandlesForExit - 1
+    if close[i] < open[i]
+        redCandleCount += 1
+if redCandleCount == consecutiveRedCandlesForExit
+    consecutiveRedCandlesExit := true
+
+// ------------------------------------------------------------------
+// --- Generalized Moving Average Crossover ---
+maType = input.string("EMA", "Moving Average Type", options=["SMA", "EMA", "WMA", "DEMA", "TEMA", "HullMA", "VWMA", "SMMA", "TMA", "LSMA"], group=groupTitle_EMACrossover, tooltip="Select the type of moving average to use for the crossover.")
+emaCrossoverPeriod = input.int(20, "Moving Average Period", minval=1, group=groupTitle_EMACrossover, tooltip="The period of the moving average for the crossover.")
+buyLogicEMACrossover = input.string("OFF", "MA Crossover Logic (BUY)", options=["AND", "OR", "ONLY", "OFF"], group=groupTitle_EMACrossover, tooltip = "How to combine with other buy signals")
+sellLogicEMACrossover = input.string("OFF", "MA Crossover Logic (SELL)", options=["AND", "OR", "ONLY", "OFF"], group=groupTitle_EMACrossover, tooltip = "How to combine with other sell signals")
+
+// Function to calculate various moving averages
+calcMA(source, length, maType) =>
+    switch maType
+        "SMA"  => ta.sma(source, length)
+        "EMA"  => ta.ema(source, length)
+        "WMA"  => ta.wma(source, length)
+        "DEMA" => 2 * ta.ema(source, length) - ta.ema(ta.ema(source, length), length)
+        "TEMA" => 3 * ta.ema(source, length) - 3 * ta.ema(ta.ema(source, length), length) + ta.ema(ta.ema(ta.ema(source, length), length), length)
+        "HullMA" => ta.wma(2 * ta.wma(source, int(length / 2)) - ta.wma(source, length), int(math.sqrt(length)))
+        "VWMA" => ta.vwma(source, length)
+        "SMMA" => ta.rma(source, length)
+        "TMA"  => ta.sma(ta.sma(source, length), length)
+        "LSMA" => ta.linreg(source, length, 0)
+        => ta.sma(source, length) // Default to SMA
+
+emaCrossover = calcMA(close, emaCrossoverPeriod, maType)
+longConditionEMACrossover = ta.crossover(close, emaCrossover)
+shortConditionEMACrossover = ta.crossunder(close, emaCrossover)
+
+// ------------------------------------------------------------------
+
+// --- BUY/SELL CONDITIONS - REFACTORED FOR SEPARATE LOGIC ---
+longCondition = false
+sellCondition = false
+
+// Function to evaluate a single buy condition
+evaluateBuyCondition(condition, logic) =>
+    logic != "OFF" ? condition : na
+
+// Function to evaluate a single sell condition
+evaluateSellCondition(condition, logic) =>
+    logic != "OFF" ? condition : na
+
+// Evaluate individual buy conditions
+buyConditionSMI_Active = evaluateBuyCondition(longConditionSMI, buyLogicSMI)
+buyConditionRSI_Active = evaluateBuyCondition(rsiUnderboughtCondition, buyLogicRSI)
+buyConditionEMA_Active = evaluateBuyCondition(emaLongSignal, buyLogicEMASignal)
+buyConditionPriceTest_Active = evaluateBuyCondition(priceTestDelayedBuySignal, buyLogicPriceTest)
+buyConditionCandle_Active = useCandlePatterns ? evaluateBuyCondition(bullishEngulfingPattern, buyLogicCandle) : na
+buyConditionPMO_Active = evaluateBuyCondition(longConditionPMO, buyLogicPMO)
+buyConditionEMACrossover_Active = evaluateBuyCondition(longConditionEMACrossover, buyLogicEMACrossover)
+
+// Evaluate individual sell conditions
+sellConditionSMI_Active = evaluateSellCondition(shortConditionSMI, sellLogicSMI)
+sellConditionRSI_Active = evaluateSellCondition(shortConditionRSI, sellLogicRSI)
+sellConditionEMA_Active = evaluateSellCondition(emaShortSignal, sellLogicEMASignal)
+sellConditionRedCandleExit_Active = evaluateSellCondition(consecutiveRedCandlesExit, sellLogicRedCandleExit)
+sellConditionCandle_Active = useCandlePatterns ? evaluateSellCondition(bearishEngulfingPattern, sellLogicCandle) : na
+sellConditionPMO_Active = evaluateSellCondition(shortConditionPMO, sellLogicPMO)
+sellConditionEMACrossover_Active = evaluateSellCondition(shortConditionEMACrossover, sellLogicEMACrossover)
+
+// Generic function to combine conditions.  Now takes 7 conditions.
+combineConditions(cond1, cond2, cond3, cond4, cond5, cond6, cond7, logic) =>
+    if logic == "ONLY"
+        cond1
+    else if logic == "AND"
+        (na(cond1) or cond1) and (na(cond2) or cond2) and (na(cond3) or cond3) and (na(cond4) or cond4) and (na(cond5) or cond5) and (na(cond6) or cond6) and (na(cond7) or cond7)
+    else if logic == "OR"
+        (na(cond1) or cond1) or (na(cond2) or cond2) or (na(cond3) or cond3) or (na(cond4) or cond4) or (na(cond5) or cond5) or (na(cond6) or cond6) or (na(cond7) or cond7)
+    else
+        na
+// Combine buy conditions - Prioritize "ONLY" conditions
+longCondition := combineConditions(buyConditionSMI_Active, buyConditionRSI_Active, buyConditionEMA_Active, buyConditionPriceTest_Active, buyConditionCandle_Active, buyConditionPMO_Active, buyConditionEMACrossover_Active, buyLogicSMI)
+if na(longCondition)
+    longCondition := combineConditions(buyConditionRSI_Active, buyConditionSMI_Active, buyConditionEMA_Active, buyConditionPriceTest_Active, buyConditionCandle_Active, buyConditionPMO_Active, buyConditionEMACrossover_Active, buyLogicRSI)
+if na(longCondition)
+    longCondition := combineConditions(buyConditionEMA_Active, buyConditionSMI_Active, buyConditionRSI_Active, buyConditionPriceTest_Active, buyConditionCandle_Active, buyConditionPMO_Active, buyConditionEMACrossover_Active, buyLogicEMASignal)
+if na(longCondition)
+    longCondition := combineConditions(buyConditionPriceTest_Active, buyConditionSMI_Active, buyConditionRSI_Active, buyConditionEMA_Active, buyConditionCandle_Active, buyConditionPMO_Active, buyConditionEMACrossover_Active, buyLogicPriceTest)
+if na(longCondition)
+    longCondition := combineConditions(buyConditionCandle_Active, buyConditionSMI_Active, buyConditionRSI_Active, buyConditionEMA_Active, buyConditionPriceTest_Active, buyConditionPMO_Active, buyConditionEMACrossover_Active, buyLogicCandle)
+if na(longCondition)
+    longCondition := combineConditions(buyConditionPMO_Active, buyConditionSMI_Active, buyConditionRSI_Active, buyConditionEMA_Active, buyConditionPriceTest_Active, buyConditionCandle_Active, buyConditionEMACrossover_Active, buyLogicPMO)
+if na(longCondition)
+    longCondition := combineConditions(buyConditionEMACrossover_Active, buyConditionSMI_Active, buyConditionRSI_Active, buyConditionEMA_Active,  buyConditionPriceTest_Active, buyConditionPMO_Active, buyConditionCandle_Active, buyLogicEMACrossover)
+
+if na(longCondition) and buyLogicSMI != "ONLY" and buyLogicRSI != "ONLY" and buyLogicEMASignal != "ONLY" and buyLogicPriceTest != 'ONLY' and buyLogicCandle != "ONLY" and buyLogicPMO != "ONLY" and buyLogicEMACrossover != "ONLY"
+    longCondition := buyConditionSMI_Active or buyConditionPriceTest_Active
+
+
+// Combine sell conditions - Prioritize "ONLY" conditions
+sellCondition := combineConditions(sellConditionSMI_Active, sellConditionRSI_Active, sellConditionEMA_Active, sellConditionRedCandleExit_Active, sellConditionCandle_Active, sellConditionPMO_Active, sellConditionEMACrossover_Active, sellLogicSMI)
+if na(sellCondition)
+    sellCondition := combineConditions(sellConditionRSI_Active, sellConditionSMI_Active, sellConditionEMA_Active, sellConditionRedCandleExit_Active, sellConditionCandle_Active, sellConditionPMO_Active, sellConditionEMACrossover_Active, sellLogicRSI)
+if na(sellCondition)
+    sellCondition := combineConditions(sellConditionEMA_Active, sellConditionSMI_Active, sellConditionRSI_Active, sellConditionRedCandleExit_Active, sellConditionCandle_Active, sellConditionPMO_Active, sellConditionEMACrossover_Active, sellLogicEMASignal)
+if na(sellCondition)
+    sellCondition := combineConditions(sellConditionRedCandleExit_Active, sellConditionSMI_Active, sellConditionRSI_Active, sellConditionEMA_Active, sellConditionCandle_Active, sellConditionPMO_Active, sellConditionEMACrossover_Active, sellLogicRedCandleExit)
+if na(sellCondition)
+    sellCondition := combineConditions(sellConditionCandle_Active, sellConditionSMI_Active, sellConditionRSI_Active, sellConditionEMA_Active, sellConditionRedCandleExit_Active, sellConditionPMO_Active, sellConditionEMACrossover_Active, sellLogicCandle)
+if na(sellCondition)
+    sellCondition := combineConditions(sellConditionPMO_Active, sellConditionSMI_Active, sellConditionRSI_Active, sellConditionEMA_Active, sellConditionRedCandleExit_Active, sellConditionCandle_Active, sellConditionEMACrossover_Active, sellLogicPMO)
+if na(sellCondition)
+    sellCondition := combineConditions(sellConditionEMACrossover_Active, sellConditionSMI_Active, sellConditionRSI_Active, sellConditionEMA_Active, sellConditionRedCandleExit_Active, sellConditionPMO_Active, sellConditionCandle_Active, sellLogicEMACrossover)
+
+if na(sellCondition) and sellLogicSMI != "ONLY" and sellLogicRSI != "ONLY" and sellLogicEMASignal != "ONLY" and sellLogicRedCandleExit != 'ONLY' and sellLogicCandle != "ONLY" and sellLogicPMO != "ONLY" and sellLogicEMACrossover != "ONLY"
+    sellCondition := sellConditionSMI_Active or sellConditionRedCandleExit_Active
+
+// --- MASTER FILTER LOGIC ---
+if useMasterFilter
+    // Use the combined conditions from above (all filters active)
+
+    // --- Incorporate Trend into BUY/SELL conditions --- (Only if useMasterFilter is on)
+    if useTrendConfirmation
+        longCondition := longCondition and bullishTrend
+        sellCondition := sellCondition and bearishTrend
+
+    // --- Incorporate Volume Filter --- (Only if useMasterFilter is on)
+    if useVolumeFilter
+        longCondition := longCondition and volumeCondition
+        // Sell condition with volume is less common, but could be added
+
+else
+    // If Master Filter is OFF, use only basic SMI and MA crossover
+    longCondition := longConditionSMI or longConditionEMACrossover
+    sellCondition := shortConditionSMI or shortConditionEMACrossover
+
+// --- Entry/Exit Logic with Dynamic TP and Stop Loss ---
+if (longCondition and inDateRange and atrValueTP >= minATR and strategy.opentrades < maxOpenTrades)
+    stopLossPrice := strategy.position_avg_price * (1 - stopLossPercent / 100)
+    strategy.entry("Long", strategy.long)
+    label.new(bar_index, low - (atrValueTP * 0.5), text="BUY", color=color.new(color.green, 0), textcolor=color.white, style=label.style_label_down, size=size.small)
+    if (useCandlePatterns and buyLogicCandle != "OFF" and bullishEngulfingPattern)
+        label.new(bar_index, low - (atrValueTP * 1.5), text="Bull Engulf", color=color.new(color.green, 70), textcolor=color.white, style=label.style_label_down, size=size.small)
+
+    tpLevel1 = strategy.position_avg_price + (atrValueTP * tpMultiplier1)
+    tpLevel2 = strategy.position_avg_price + (atrValueTP * tpMultiplier2)
+    tpLevel3 = strategy.position_avg_price + (atrValueTP * tpMultiplier3)
+    tpLevel4 = strategy.position_avg_price + (atrValueTP * tpMultiplier4)
+    tpLevel5 = strategy.position_avg_price + (atrValueTP * tpMultiplier5)
+
+    if numTPOrders >= 1
+        strategy.exit("TP1", "Long", qty_percent=100 / numTPOrders, limit=tpLevel1)
+        label.new(bar_index, tpLevel1, text="TP1", color=color.new(color.blue, 50), textcolor=color.white, style=label.style_label_left, size=size.small)
+    if numTPOrders >= 2
+        strategy.exit("TP2", "Long", qty_percent=100 / numTPOrders, limit=tpLevel2)
+        label.new(bar_index, tpLevel2, text="TP2", color=color.new(color.blue, 50), textcolor=color.white, style=label.style_label_left, size=size.small)
+    if numTPOrders >= 3
+        strategy.exit("TP3", "Long", qty_percent=100 / numTPOrders, limit=tpLevel3)
+        label.new(bar_index, tpLevel3, text="TP3", color=color.new(color.blue, 50), textcolor=color.white, style=label.style_label_left, size=size.small)
+    if numTPOrders >= 4
+        strategy.exit("TP4", "Long", qty_percent=100 / numTPOrders, limit=tpLevel4)
+        label.new(bar_index, tpLevel4, text="TP4", color=color.new(color.blue, 50), textcolor=color.white, style=label.style_label_left, size=size.small)
+    if numTPOrders >= 5
+        strategy.exit("TP5", "Long", qty_percent=100 / numTPOrders, limit=tpLevel5)
+        label.new(bar_index, tpLevel5, text="TP5", color=color.new(color.blue, 50), textcolor=color.white, style=label.style_label_left, size=size.small)
+
+// Trailing Stop Logic
+if (useTrailingStop and strategy.position_size > 0)
+    newStopLossPrice = strategy.position_avg_price * (1 - trailingStopPercent / 100)
+    stopLossPrice := math.max(stopLossPrice, newStopLossPrice)
+
+// --- STOP LOSS EXIT ---
+if (useStopLoss and strategy.position_size > 0)
+    if (low <= stopLossPrice)
+        strategy.close("Long", comment="Stop Loss")
+        label.new(bar_index, high + atrValueTP, "SL", color=color.rgb(255, 0, 0, 0), style=label.style_label_up, textcolor=color.rgb(255, 255, 255, 0))
+
+// --- EXIT CONDITIONS - USING REFACTORED sellCondition ---
+if (sellCondition and strategy.position_size > 0 and inDateRange)
+    strategy.close("Long", comment="Sell Signal")
+    label.new(bar_index, high + (atrValueTP * 0.5), text="SELL", color=color.new(color.red, 0), textcolor=color.white, style=label.style_label_up, size=size.small)
+    if (useCandlePatterns and sellLogicCandle != "OFF" and bearishEngulfingPattern)
+        label.new(bar_index, high + (atrValueTP * 1.5), text="Bear Engulf", color=color.new(color.red, 70), textcolor=color.white, style=label.style_label_up, size=size.small)
+
+// --- DEBUG PLOTSHAPES ---
+plotshape(series=showEMASignals ? emaLongSignal : na, title="EMA Long Signal Diamond", color=color.green, style=shape.diamond, size=size.tiny, location=location.belowbar)
+plotshape(series=showEMASignals ? emaShortSignal : na, title="EMA Short Signal Diamond", color=color.red, style=shape.diamond, size=size.tiny, location=location.abovebar)
+
+plotshape(series=showDebugPlots ? sellCondition : na, title="SELL Condition (sellCondition - final) - RED TRIANGLE", color=color.red, style=shape.triangledown, size=size.large, location=location.abovebar)
+plotshape(series=showDebugPlots ? longConditionSMI : na, title="SMI Buy", color=color.green, style=shape.triangleup, size=size.small, location = location.bottom)
+plotshape(series=showDebugPlots ? shortConditionSMI : na, title="SMI Sell", color=color.red, style=shape.triangledown, size=size.small, location = location.top)
+plotshape(series=showDebugPlots ? rsiOversold : na, title="3. RSI <= Oversold Level - LIME SQUARE", color=color.lime, style=shape.square, size=size.large, location=location.abovebar)
+plotshape(series=showDebugPlots ? delayExitConditionStart : na, title="4. Delay Exit START - FUCHSIA X", color=color.fuchsia, style=shape.xcross, size=size.large, location=location.abovebar)
+plotshape(series=showDebugPlots ? delayExitConditionConfirm : na, title="5. Delay Exit CONFIRM - TEAL FLAG", color=color.teal, style=shape.flag, size=size.large, location=location.abovebar)
+plotshape(series=showDebugPlots ? priceTestDelayedBuySignal : na, title="Price Test Delayed Buy", color=color.blue, style=shape.labelup, text="PT\nBUY")
+plotshape(series=showDebugPlots and useCandlePatterns and bullishEngulfingPattern ? bullishEngulfingPattern : na, title="Bullish Engulfing", color=color.green, style=shape.triangleup, location=location.belowbar, size=size.normal)
+plotshape(series=showDebugPlots and useCandlePatterns and bearishEngulfingPattern ? bearishEngulfingPattern : na, title="Bearish Engulfing", color=color.red, style=shape.triangledown, location=location.abovebar, size=size.normal)
+plotshape(series=showDebugPlots ? longConditionPMO : na, title="PMO Buy", color=color.green, style=shape.cross, size=size.small, location=location.bottom)
+plotshape(series=showDebugPlots ? shortConditionPMO : na, title="PMO Sell", color=color.red, style=shape.cross, size=size.small, location=location.top)
+plotshape(series=showDebugPlots ? longConditionEMACrossover : na, title="MA Crossover Buy", color=color.yellow, style=shape.triangleup, size=size.small, location = location.bottom)
+plotshape(series=showDebugPlots ? shortConditionEMACrossover : na, title="MA Crossover Sell", color=color.yellow, style=shape.triangledown, size=size.small, location = location.top)
+
+// - TREND DEBUG PLOTS
+plotshape(series=showDebugPlots and useTrendConfirmation? bullishTrend: na, title="Bullish Trend", color=color.green, style=shape.triangleup, size=size.small, location = location.belowbar)
+plotshape(series=showDebugPlots and useTrendConfirmation? bearishTrend: na, title="Bearish Trend", color=color.red, style=shape.triangledown, size=size.small, location = location.abovebar)
+
+// --- Plotting ---
+plot(series=showPlots ? smi : na, title="SMI", color=color.blue)
+plot(series=showPlots ? smi_ema : na, title="SMI-based EMA", color=color.orange)
+plot(series=showPlots ? rsiValue : na, title="RSI", color=color.purple, linewidth=2)
+hline(price=rsiOversoldLevel, title="RSI Oversold Level", color=color.gray, linestyle=hline.style_dashed, display=showPlots ? display.all : display.none)
+plot(series=showPlots ? atrValueTP : na, title="ATR for TP", color=color.teal)
+hline(price=atrLowVolatilityThreshold, title="Low Volatility", color=color.gray, linestyle=hline.style_dashed, display=showPlots ? display.all : display.none)
+hline(price=atrMediumVolatilityThreshold, title="Medium Volatility", color=color.gray, linestyle=hline.style_dashed, display=showPlots ? display.all : display.none)
+plot(series=showPlots ? emaHigh : na, title="EMA High", color=color.aqua)
+plot(series=showPlots ? emaLow : na, title="EMA Low", color=color.aqua)
+plot(series=showPlots ? priceTestLow : na, title="Price Test Low", color=color.gray, style=plot.style_line)
+plot(series=showPlots ? pmoWMA : na, title="PMO", color=color.blue)
+plot(series=showPlots ? pmoSignal : na, title="PMO Signal", color=color.orange)
+plot(series=showPlots and useEMACrossover ? emaCrossover : na, title="MA Crossover", color=color.yellow)
+
+
+// ----- TREND CONFIRMATION CHARTS
+plot(series=showPlots and useTrendConfirmation? fastEMA: na, title="Fast EMA", color=color.blue)
+plot(series=showPlots and useTrendConfirmation? pivotEMA: na, title="Pivot EMA", color=color.orange)
+plot(series=showPlots and useTrendConfirmation? slowEMA: na, title="Slow EMA", color=color.red)
+plot(series=showPlots and useTrendConfirmation and trendDefinitionMethod == "Alternate"? hullMA: na, title="Hull MA", color=color.blue)
+plot(series=showPlots and useTrendConfirmation and trendDefinitionMethod == "Alternate"? vwma: na, title="VWMA", color=color.orange)
+
+
+// ------------------------------------------------------------------
+// --- Generalized Moving Average Crossover ---
+//useEMACrossover = input.bool(false, "Use Moving Average Crossover", group=groupTitle_EMACrossover, tooltip="Enable/disable the moving average crossover strategy.") //Changed name for clarity  -- MOVED TO TOGGLES
+//maType = input.string("EMA", "Moving Average Type", options=["SMA", "EMA", "WMA", "DEMA", "TEMA", "HullMA", "VWMA", "SMMA", "TMA", "LSMA"], group=groupTitle_EMACrossover, tooltip="Select the type of moving average to use for the crossover.")
+//emaCrossoverPeriod = input.int(20, "Moving Average Period", minval=1, group=groupTitle_EMACrossover, tooltip="The period of the moving average for the crossover.")
+//buyLogicEMACrossover = input.string("OFF", "MA Crossover Logic (BUY)", options=["AND", "OR", "ONLY", "OFF"], group=groupTitle_EMACrossover, tooltip = "How to combine with other buy signals")
+//sellLogicEMACrossover = input.string("OFF", "MA Crossover Logic (SELL)", options=["AND", "OR", "ONLY", "OFF"], group=groupTitle_EMACrossover, tooltip = "How to combine with other sell signals")
+
+// Function to calculate various moving averages
+//calcMA(source, length, maType) =>
+//    switch maType
+//        "SMA"  => ta.sma(source, length)
+//        "EMA"  => ta.ema(source, length)
+//        "WMA"  => ta.wma(source, length)
+//        "DEMA" => 2 * ta.ema(source, length) - ta.ema(ta.ema(source, length), length)
+//        "TEMA" => 3 * ta.ema(source, length) - 3 * ta.ema(ta.ema(source, length), length) + ta.ema(ta.ema(ta.ema(source, length), length), length)
+//        "HullMA" => ta.wma(2 * ta.wma(source, int(length / 2)) - ta.wma(source, length), int(math.sqrt(length)))
+//        "VWMA" => ta.vwma(source, length)
+//        "SMMA" => ta.rma(source, length)  // Smoothed Moving Average (same as RMA)
+//        "TMA"  => ta.sma(ta.sma(source, length), length) // Triangular Moving Average
+//        "LSMA" => ta.linreg(source, length, 0) // Least Squares Moving Average
+//        => ta.sma(source, length) // Default to SMA
+
+// emaCrossover = calcMA(close, emaCrossoverPeriod, maType)  // Now uses the function
+//longConditionEMACrossover = ta.crossover(close, emaCrossover)
+//shortConditionEMACrossover = ta.crossunder(close, emaCrossover)
+
+// --- In the BUY condition evaluation ---
+//buyConditionEMACrossover_Active = evaluateBuyCondition(longConditionEMACrossover, buyLogicEMACrossover)
+
+// --- In the SELL condition evaluation ---
+//sellConditionEMACrossover_Active = evaluateSellCondition(shortConditionEMACrossover, sellLogicEMACrossover)
+
+// --- Add to the combineConditions calls for both buy and sell:
+// BUY and SELL combination logic already handled in previous steps.
+// ------------------------------------------------------------------
+
+
+
+// --- Check for Master Filter State Change --- and reset if switched off
+if useMasterFilter == false and justTurnedOffMasterFilter == false
+    // This block only executes when useMasterFilter is *just* turned to false
+
+    // --- Reset BUY Filters ---
+    buyLogicSMI := "OFF"
+    buyLogicRSI := "OFF"
+    buyLogicEMASignal := "OFF"
+    buyLogicPriceTest := "OFF"
+    buyLogicCandle := "OFF"
+    buyLogicPMO := "OFF"
+    buyLogicEMACrossover := "OFF"
+
+    // --- Reset SELL Filters ---
+    sellLogicSMI := "OFF"
+    sellLogicRSI := "OFF"
+    sellLogicEMASignal := "OFF"
+    sellLogicRedCandleExit := "OFF"
+    sellLogicCandle := "OFF"
+    sellLogicPMO := "OFF"
+    sellLogicEMACrossover := "OFF"
+
+     // --- Reset TOGGLES --- //important to also reset the toggles
+    useRSIFilter := false
+    useEMASignal := false
+    usePriceTestDelayedBuy := false
+    useSMIFilter := false
+    useConsecutiveRedExit := false
+    useCandlePatterns := false
+    usePMOFilter := false
+    useEMACrossover := false
+    useTrendConfirmation := false // Also reset trend confirmation
+    useVolumeFilter := false    // Also reset volume filter
+
+
+    justTurnedOffMasterFilter := true // Set the flag so this doesn't run again until re-enabled
+
+else if useMasterFilter == true
+    justTurnedOffMasterFilter := false // Reset flag when master filter is turned back on
+
+// END
